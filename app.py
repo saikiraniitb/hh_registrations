@@ -46,6 +46,27 @@ def normal_email(value):
     return str(value or "").strip().casefold()
 
 
+def jobseeker_location(profile):
+    """Prefer current employment location; use resume address when unavailable."""
+    work = profile.get("work_experience") or []
+    records = work if isinstance(work, list) else [work]
+    current = next((w for w in records if isinstance(w, dict) and w.get("isCurrentlyWorking") and w.get("currentLocation")), None)
+    if current:
+        return str(current["currentLocation"]).strip()
+    resume = ((profile.get("completeResumeDetails") or {}).get("parsed_resume") or {}).get("ResumeParserData") or {}
+    addresses = resume.get("Address") or []
+    if isinstance(addresses, dict):
+        addresses = [addresses]
+    for address in addresses:
+        if not isinstance(address, dict):
+            continue
+        city = str(address.get("City") or "").strip()
+        state = str(address.get("State") or "").strip()
+        if city:
+            return ", ".join(x for x in (city, state) if x and x.casefold() != city.casefold())
+    return next((str(w.get("currentLocation")).strip() for w in records if isinstance(w, dict) and w.get("currentLocation")), "")
+
+
 def name_from(profile, user):
     info = profile.get("personal_info") or {}
     return " ".join(str(info.get(k) or "").strip() for k in ("firstName", "middleName", "lastName")).strip() or " ".join(str(user.get(k) or "").strip() for k in ("firstName", "lastName")).strip() or user.get("name") or ""
@@ -67,7 +88,7 @@ def load_data(_client, ids):
     candidate_ids = {sid(x.get("jobSeekerId")) for x in members if x.get("jobSeekerId")}
     candidate_ids.update(sid(x.get("jobseekerId")) for x in attempts if x.get("jobseekerId"))
     users = list(db.users.find({"_id": {"$in": mongo_ids(list(candidate_ids))}}, {"email": 1, "source": 1, "name": 1, "firstName": 1, "lastName": 1}))
-    profiles = list(db.jobSeekerProfile.find({"_id": {"$in": mongo_ids(list(candidate_ids))}}, {"personal_info.firstName": 1, "personal_info.middleName": 1, "personal_info.lastName": 1, "personal_info.email": 1, "personal_info.phoneNumber": 1}))
+    profiles = list(db.jobSeekerProfile.find({"_id": {"$in": mongo_ids(list(candidate_ids))}}, {"personal_info.firstName": 1, "personal_info.middleName": 1, "personal_info.lastName": 1, "personal_info.email": 1, "personal_info.phoneNumber": 1, "work_experience.currentLocation": 1, "work_experience.isCurrentlyWorking": 1, "completeResumeDetails.parsed_resume.ResumeParserData.Address.City": 1, "completeResumeDetails.parsed_resume.ResumeParserData.Address.State": 1}))
     # One upload may appear multiple times. Choose a candidate/contest-specific record without multiplying totals.
     uploads = list(db.recruiterAddProfiles.find({"contestId": {"$in": cid_values}}, {"contestId": 1, "recruiterId": 1, "jobseekerDetails.jsId": 1, "jobseekerDetails.source": 1, "jobseekerDetails.createdAt": 1}))
     recruiter_ids = {sid(a.get("recruiterId")) for a in attempts if a.get("recruiterId")}
@@ -156,6 +177,7 @@ def build_rows(data):
             "Name": name_from(p, u),
             "Email": u.get("email") or info.get("email") or "",
             "Phone Number": info.get("phoneNumber") or "",
+            "Jobseeker Location": jobseeker_location(p),
             "Profile Source": upload.get("source") or u.get("source") or "",
             "Recruiter Name": recruiter_name,
             "Recruiter Email": rec_email,
@@ -246,14 +268,14 @@ st.subheader("Candidate-level tracker")
 statuses = ["All"] + sorted(view["Status"].dropna().unique().tolist())
 status_filter = st.selectbox("Filter by status", statuses)
 mcq_filter = st.selectbox("MCQ given", ["All", "Yes", "No"])
-search = st.text_input("Search name, email, phone, recruiter or Jobseeker ID")
+search = st.text_input("Search name, email, phone, location, recruiter or Jobseeker ID")
 filtered = view.copy()
 if status_filter != "All":
     filtered = filtered[filtered["Status"] == status_filter]
 if mcq_filter != "All":
     filtered = filtered[filtered["MCQ Given?"] == mcq_filter]
 if search:
-    columns = ["Name", "Email", "Phone Number", "Recruiter Name", "Jobseeker ID"]
+    columns = ["Name", "Email", "Phone Number", "Jobseeker Location", "Recruiter Name", "Jobseeker ID"]
     filtered = filtered[filtered[columns].fillna("").astype(str).apply(lambda col: col.str.contains(search, case=False, regex=False)).any(axis=1)]
 st.dataframe(filtered, hide_index=True, use_container_width=True, height=470)
 st.download_button("Download filtered CSV", filtered.to_csv(index=False).encode("utf-8-sig"), file_name=f"hh_multi_contest_mcq_{datetime.now(IST).strftime('%Y%m%d_%H%M')}.csv", mime="text/csv")
